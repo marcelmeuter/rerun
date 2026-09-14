@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use egui::{FocusDirection, Key};
 use re_async::AsyncRuntimeHandle;
@@ -84,6 +85,7 @@ pub struct App {
     app_env: crate::AppEnvironment,
 
     startup_options: StartupOptions,
+    context_hooks_enabled: Arc<AtomicBool>,
     start_time: web_time::Instant,
     ram_limit_warner: re_memory::RamLimitWarner,
     pub(crate) egui_ctx: egui::Context,
@@ -186,6 +188,22 @@ pub struct App {
 }
 
 impl App {
+    /// Enable the viewer's context-wide timeline shortcut and clipboard hooks.
+    ///
+    /// Embedded hosts must set this before egui begins the pass (for example in
+    /// [`eframe::App::raw_input_hook`]) and disable it immediately when leaving the viewer.
+    /// Disabling also discards a pending timeline shortcut, so it cannot fire on return.
+    /// This does not pause ingestion or playback, or disable widgets in a rendered viewer.
+    /// The clipboard hook applies to all copied text in the context while enabled.
+    pub fn set_context_hooks_enabled(&mut self, enabled: bool) {
+        self.context_hooks_enabled.store(enabled, Ordering::Relaxed);
+        if !enabled {
+            self.egui_ctx.data_mut(|data| {
+                data.remove::<re_ui::RecordingCommandKind>(pending_timeline_shortcut_key());
+            });
+        }
+    }
+
     pub fn new(
         main_thread_token: MainThreadToken,
         build_info: re_build_info::BuildInfo,
@@ -425,9 +443,20 @@ impl App {
             command_sender.send_ui(UICommand::ExpandBlueprintPanel);
         }
 
+        // The callbacks must not keep a dropped viewer active. The atomic only carries this
+        // flag, not other state; reads/writes otherwise happen on the UI thread.
+        let context_hooks_enabled =
+            Arc::new(AtomicBool::new(startup_options.context_hooks_enabled));
+        let clipboard_enabled = Arc::downgrade(&context_hooks_enabled);
         creation_context.egui_ctx.on_end_pass(
             "remove copied text formatting",
-            Arc::new(|ctx| {
+            Arc::new(move |ctx| {
+                if !clipboard_enabled
+                    .upgrade()
+                    .is_some_and(|enabled| enabled.load(Ordering::Relaxed))
+                {
+                    return;
+                }
                 ctx.output_mut(|o| {
                     for command in &mut o.commands {
                         if let egui::output::OutputCommand::CopyText(text) = command {
@@ -439,6 +468,7 @@ impl App {
         );
 
         {
+            let shortcuts_enabled = Arc::downgrade(&context_hooks_enabled);
             // This is a workaround consuming the space and arrow keys so we can use them as timeline shortcuts.
             // Egui's built in behavior is to interact with focus, and we don't want that.
             // TODO(emilk/egui#7899): allow consuming events before egui uses them to move keyboard focus.
@@ -446,6 +476,12 @@ impl App {
             creation_context.egui_ctx.on_begin_pass(
                 "rerun-kb-shortcuts",
                 Arc::new(move |ctx| {
+                    if !shortcuts_enabled
+                        .upgrade()
+                        .is_some_and(|enabled| enabled.load(Ordering::Relaxed))
+                    {
+                        return;
+                    }
                     // egui has already listened for arrow keys before this point,
                     // so in order for the arrow keys to NOT move the focus, we need to
                     // undo that focus change here:
@@ -477,6 +513,7 @@ impl App {
             build_info,
             app_env,
             startup_options,
+            context_hooks_enabled,
             start_time: web_time::Instant::now(),
             ram_limit_warner: re_memory::RamLimitWarner::warn_at_fraction_of_max(0.75),
             egui_ctx: creation_context.egui_ctx.clone(),

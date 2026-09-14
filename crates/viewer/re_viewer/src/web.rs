@@ -842,6 +842,7 @@ fn create_app(
         location: Some(cc.integration_info.web_info.location.clone()),
         // Don't persist state in integration-test mode.
         persist_state: !integration_test,
+        context_hooks_enabled: true,
         is_in_notebook: notebook.unwrap_or(false),
         expect_data_soon: None,
         force_wgpu_backend: render_backend.clone(),

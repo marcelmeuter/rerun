@@ -22,6 +22,13 @@ pub struct LoginOptions {
 pub struct StartupOptions {
     pub persist_state: bool,
 
+    /// Whether the viewer's context-wide timeline shortcut and clipboard hooks are enabled.
+    ///
+    /// Defaults to true for standalone viewers. Hosts sharing an egui context with other views
+    /// should disable this initially and use [`crate::App::set_context_hooks_enabled`] when
+    /// changing which view owns input.
+    pub context_hooks_enabled: bool,
+
     /// Whether or not the app is running in the context of a Jupyter Notebook.
     pub is_in_notebook: bool,
 
@@ -169,6 +176,7 @@ impl Default for StartupOptions {
     fn default() -> Self {
         Self {
             persist_state: true,
+            context_hooks_enabled: true,
             is_in_notebook: false,
 
             #[cfg(target_arch = "wasm32")]
