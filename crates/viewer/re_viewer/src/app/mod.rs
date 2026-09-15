@@ -1103,6 +1103,18 @@ impl App {
             .map(|tc| tc.current_query())
     }
 
+    /// Returns the active recording's playback mode, if its time control exists.
+    ///
+    /// Embedding applications can distinguish live following from playback without inferring
+    /// intent from the cursor position. This does not change the recording or its time control.
+    pub fn current_play_state(&self) -> Option<PlayState> {
+        let store_id = self.active_recording_id()?;
+        self.state
+            .time_controls
+            .get(store_id)
+            .map(|tc| tc.play_state())
+    }
+
     // NOTE: Relying on `self` is dangerous, as this is called during a time where some internal
     // fields may have been temporarily `take()`n out. Keep this a static method.
     fn handle_dropping_files(
