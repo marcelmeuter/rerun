@@ -195,7 +195,7 @@ impl App {
     /// Disabling also discards a pending timeline shortcut, so it cannot fire on return.
     /// This does not pause ingestion or playback, or disable widgets in a rendered viewer.
     /// The clipboard hook applies to all copied text in the context while enabled.
-    pub fn set_context_hooks_enabled(&mut self, enabled: bool) {
+    pub fn set_context_hooks_enabled(&self, enabled: bool) {
         self.context_hooks_enabled.store(enabled, Ordering::Relaxed);
         if !enabled {
             self.egui_ctx.data_mut(|data| {
@@ -345,13 +345,11 @@ impl App {
                 && connection_registry.internal_origin().is_none()
             {
                 let catalog = cfg_select! {
-                    target_arch = "wasm32" => { crate::internal_catalog::build() }
-                    _ => {
-                        crate::internal_catalog::build(std::net::SocketAddr::from((
-                            std::net::Ipv4Addr::LOCALHOST,
-                            re_uri::DEFAULT_PROXY_PORT,
-                        )))
-                    }
+                    target_arch = "wasm32" => crate::internal_catalog::build(),
+                    _ => crate::internal_catalog::build(std::net::SocketAddr::from((
+                        std::net::Ipv4Addr::LOCALHOST,
+                        re_uri::DEFAULT_PROXY_PORT,
+                    ))),
                 };
 
                 connection_registry.with_internal(catalog.connection)
@@ -616,6 +614,63 @@ impl App {
 
     pub fn app_options_mut(&mut self) -> &mut AppOptions {
         self.state.app_options_mut()
+    }
+
+    /// Configure host-owned blueprint storage before admitting recordings.
+    ///
+    /// This does not enable standalone account, navigation, or egui-state persistence.
+    /// An omitted validator uses the viewer's standard blueprint validation.
+    pub fn set_blueprint_persistence(&mut self, mut persistence: BlueprintPersistence) {
+        if persistence.validator.is_none() {
+            let reflection = self.reflection().components.clone();
+            persistence.validator = Some(Box::new(move |blueprint| {
+                crate::blueprint::is_valid_blueprint(blueprint, &reflection)
+            }));
+        }
+        self.store_hub
+            .as_mut()
+            .expect("store hub available outside viewer callbacks")
+            .set_blueprint_persistence(persistence);
+    }
+
+    /// Save changed blueprints through the configured callbacks, independently of app state.
+    ///
+    /// Calls the configured saver synchronously; this does not schedule background I/O.
+    ///
+    /// # Errors
+    /// Returns storage failures to the embedding host instead of only logging them.
+    /// A failed save remains eligible for retry through the configured persistence backend.
+    pub fn save_blueprints(&mut self) -> anyhow::Result<()> {
+        let hub = self
+            .store_hub
+            .as_mut()
+            .ok_or_else(|| anyhow::anyhow!("Store hub unavailable"))?;
+        if self.state.app_options.blueprint_gc {
+            hub.gc_blueprints(&self.state.blueprint_undo_state);
+        }
+        hub.save_app_blueprints()?;
+        self.table_blueprints.save_persisted_blueprints(hub)
+    }
+
+    /// Snapshot the active recording's blueprint using the standard export semantics.
+    ///
+    /// Encoding can be performed off the UI thread using [`crate::RrdSnapshot::encode`].
+    ///
+    /// # Errors
+    /// Returns an error when no recording/blueprint is active or snapshot construction fails.
+    pub fn snapshot_active_blueprint(&self) -> anyhow::Result<crate::RrdSnapshot> {
+        let recording = self
+            .active_recording_id()
+            .ok_or_else(|| anyhow::anyhow!("No active recording"))?;
+        let blueprint = self
+            .store_hub
+            .as_ref()
+            .and_then(|hub| hub.active_blueprint_for_app(recording.application_id()))
+            .ok_or_else(|| anyhow::anyhow!("No active blueprint"))?;
+        crate::RrdSnapshot::blueprint(
+            blueprint,
+            self.state.blueprint_undo_state.get(blueprint.store_id()),
+        )
     }
 
     pub fn app_env(&self) -> &crate::AppEnvironment {

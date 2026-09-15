@@ -16,7 +16,6 @@ pub struct RrdSnapshot {
 }
 
 impl RrdSnapshot {
-    #[cfg(any(target_arch = "wasm32", test))]
     pub fn encode(self) -> anyhow::Result<Vec<u8>> {
         let mut bytes = Vec::new();
         re_log_encoding::Encoder::encode_into(
@@ -198,6 +197,63 @@ pub fn encode_to_file(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn blueprint_snapshot_keeps_layout_and_uses_a_new_store_identity() {
+        use re_chunk::{RowId, TimePoint};
+
+        let store_id = re_log_types::StoreId::random(
+            StoreKind::Blueprint,
+            ApplicationId::from("host-owned-layout"),
+        );
+        let mut blueprint = EntityDb::new(store_id.clone());
+        blueprint.set_store_info(re_log_types::SetStoreInfo {
+            row_id: *RowId::new(),
+            info: re_log_types::StoreInfo::new(
+                store_id.clone(),
+                re_log_types::StoreSource::Other("test".into()),
+            ),
+        });
+        let chunk = re_chunk::Chunk::builder("viewport")
+            .with_archetype(
+                RowId::new(),
+                TimePoint::STATIC,
+                &re_sdk_types::blueprint::archetypes::ViewportBlueprint::default()
+                    .with_auto_layout(false),
+            )
+            .build()
+            .expect("valid test chunk");
+        blueprint.add_chunk(&std::sync::Arc::new(chunk)).unwrap();
+        let original = blueprint.format_with_components();
+        let bytes = RrdSnapshot::blueprint(&blueprint, None)
+            .unwrap()
+            .encode()
+            .unwrap();
+        let bundle = re_entity_db::StoreBundle::from_rrd(
+            std::io::BufReader::new(std::io::Cursor::new(bytes)),
+            &re_log_channel::LogSource::Sdk,
+        )
+        .unwrap();
+        let saved = bundle.entity_dbs().collect::<Vec<_>>();
+        assert_eq!(saved.len(), 1);
+        assert_eq!(saved[0].store_kind(), StoreKind::Blueprint);
+        assert_ne!(saved[0].store_id(), &store_id);
+        assert_eq!(
+            saved[0].store_id().application_id(),
+            store_id.application_id()
+        );
+        let (_, auto_layout) = saved[0]
+            .latest_at_component::<re_sdk_types::blueprint::components::AutoLayout>(
+                &"viewport".into(),
+                &re_chunk_store::LatestAtQuery::new("blueprint".into(), 1),
+                re_sdk_types::blueprint::archetypes::ViewportBlueprint::descriptor_auto_layout()
+                    .component,
+            )
+            .expect("saved layout setting");
+        assert!(!auto_layout.0.0);
+        assert_eq!(blueprint.store_id(), &store_id);
+        assert_eq!(blueprint.format_with_components(), original);
+    }
 
     #[test]
     fn recording_snapshot_decodes_as_rrd() {

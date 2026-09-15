@@ -221,6 +221,15 @@ pub struct StoreHubStats {
 }
 
 impl StoreHub {
+    /// Replace the host's blueprint persistence callbacks without loading or saving any stores.
+    ///
+    /// Configure this before admitting recordings to avoid loading from the previous backend.
+    /// Existing stores are retained and considered unsaved in the new backend.
+    pub fn set_blueprint_persistence(&mut self, persistence: BlueprintPersistence) {
+        self.persistence = persistence;
+        self.blueprint_last_save.clear();
+    }
+
     /// App ID used as a marker to display the welcome screen.
     pub fn welcome_screen_app_id() -> &'static ApplicationId {
         static APP_ID: LazyLock<ApplicationId> = LazyLock::new(|| "Welcome screen".into());
@@ -1594,6 +1603,46 @@ mod tests {
                 .build()
                 .expect("chunk should build"),
         )
+    }
+
+    #[test]
+    fn replacing_persistence_retries_unchanged_blueprints_in_the_new_backend() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let mut hub = StoreHub::test_hub();
+        let app = ApplicationId::from("host-owned-storage");
+        hub.ensure_active_blueprint_for_app(&app);
+        let id = hub.active_blueprint_id_for_app(&app).unwrap().clone();
+        hub.store_bundle
+            .get_mut(&id)
+            .unwrap()
+            .add_chunk(&dummy_chunk())
+            .unwrap();
+        let key = BlueprintPersistenceKey::Recording(app);
+        hub.mark_blueprint_persisted(&id);
+        hub.set_blueprint_persistence(BlueprintPersistence {
+            saver: Some(Box::new(|_, _| anyhow::bail!("disk unavailable"))),
+            ..Default::default()
+        });
+        assert!(hub.save_persisted_blueprint_if_changed(&key, &id).is_err());
+        assert!(!hub.blueprint_last_save.contains_key(&id));
+
+        let saves = Arc::new(AtomicUsize::new(0));
+        let observed = saves.clone();
+        hub.set_blueprint_persistence(BlueprintPersistence {
+            saver: Some(Box::new(move |_, _| {
+                observed.fetch_add(1, Ordering::Relaxed);
+                Ok(())
+            })),
+            ..Default::default()
+        });
+        hub.save_persisted_blueprint_if_changed(&key, &id).unwrap();
+        hub.save_persisted_blueprint_if_changed(&key, &id).unwrap();
+        assert_eq!(saves.load(Ordering::Relaxed), 1);
+        assert!(
+            hub.store_bundle.get(&id).is_some(),
+            "changing storage must retain the layout"
+        );
     }
 
     /// When the active blueprint for an app is auto-created empty and then a

@@ -74,6 +74,7 @@ pub use re_capabilities::MainThreadToken;
 pub use re_viewer_context::{
     CommandReceiver, CommandSender, SystemCommand, SystemCommandSender, command_channel,
 };
+pub use saving::RrdSnapshot;
 pub use startup_options::{LoginOptions, StartupOptions};
 pub use ui::about_rerun_ui;
 pub(crate) use ui::dev_panel;
